@@ -1,0 +1,13 @@
+{
+  "name": "arena-pulse-online-x1",
+  "version": "1.0.0",
+  "description": "Arena Pulse X1 online multiplayer 2D",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "socket.io": "^4.7.5"
+  }
+}

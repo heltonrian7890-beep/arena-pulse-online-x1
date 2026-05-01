@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Arena Pulse X1 Online</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#0f0f0f;color:white;font-family:Arial,sans-serif;overflow:hidden}
+#gameWrap{width:100vw;height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(#151515,#050505)}
+canvas{background:linear-gradient(#1c1c1c 0%,#222 55%,#0f5f2d 56%,#0b4a23 100%);border:3px solid #fff;border-radius:16px;box-shadow:0 0 30px rgba(255,255,255,.15);max-width:100vw;max-height:100vh}
+#hud{position:fixed;top:12px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,.7);border:1px solid rgba(255,255,255,.25);border-radius:14px;padding:10px 18px;text-align:center;z-index:2}
+#score{font-size:30px;font-weight:bold;letter-spacing:2px}
+#status{font-size:13px;color:#ddd;margin-top:4px}
+#menu{position:fixed;inset:0;background:rgba(0,0,0,.86);display:flex;align-items:center;justify-content:center;z-index:10;padding:20px}
+#card{background:#1e1e1e;border:1px solid #444;border-radius:18px;padding:24px;width:100%;max-width:430px;text-align:center}
+input,button{width:100%;padding:12px;border-radius:10px;border:0;margin:8px 0;font-weight:bold}
+input{background:#2a2a2a;color:white;border:1px solid #444}
+button{cursor:pointer;background:white;color:#111}
+.small{color:#bbb;font-size:13px;line-height:1.4}
+.mobileBtns{display:none;position:fixed;bottom:15px;right:15px;z-index:3;gap:8px;flex-wrap:wrap;max-width:260px;justify-content:flex-end}
+.mobileBtns button{width:58px;height:58px;border-radius:50%;margin:0;background:#fff;color:#111;font-size:18px}
+@media(max-width:800px){.mobileBtns{display:flex}}
+</style>
+</head>
+<body>
+
+<div id="gameWrap"><canvas id="game" width="1000" height="560"></canvas></div>
+
+<div id="hud">
+  <div id="score">0 × 0</div>
+  <div id="status">Arena Pulse X1 Online</div>
+</div>
+
+<div class="mobileBtns">
+  <button id="mLeft">←</button>
+  <button id="mRight">→</button>
+  <button id="mJump">↑</button>
+  <button id="mKick">⚽</button>
+</div>
+
+<div id="menu">
+  <div id="card">
+    <h1>Arena Pulse X1 Online</h1>
+    <p class="small">Crie uma sala e envie o código para outra pessoa jogar de outra cidade/estado.</p>
+
+    <input id="nameInput" placeholder="Seu nome">
+    <button onclick="createRoom()">Criar sala</button>
+
+    <input id="roomInput" placeholder="Código da sala. Ex: AP1234">
+    <button onclick="joinRoom()">Entrar na sala</button>
+
+    <p id="menuMsg" class="small"></p>
+  </div>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+const socket = io();
+
+const canvas=document.getElementById('game');
+const ctx=canvas.getContext('2d');
+const scoreEl=document.getElementById('score');
+const statusEl=document.getElementById('status');
+const W=canvas.width,H=canvas.height,ground=465,gravity=0.55;
+
+let roomCode=null;
+let myPlayer=null;
+let isHost=false;
+let running=false;
+let keys={};
+let remoteInput={};
+let lastSync=0;
+
+let score={p1:0,p2:0};
+const p1={x:220,y:ground,w:58,h:88,vx:0,vy:0,color:'#fff',accent:'#bdbdbd',dir:1,onGround:true,kickCooldown:0};
+const p2={x:720,y:ground,w:58,h:88,vx:0,vy:0,color:'#d9d9d9',accent:'#777',dir:-1,onGround:true,kickCooldown:0};
+const ball={x:500,y:230,r:24,vx:3,vy:-2,spin:0};
+
+function createRoom(){
+  const name=document.getElementById("nameInput").value || "Jogador 1";
+  socket.emit("createRoom", name);
+}
+function joinRoom(){
+  const name=document.getElementById("nameInput").value || "Jogador 2";
+  const code=document.getElementById("roomInput").value.trim().toUpperCase();
+  socket.emit("joinRoom", {code, name});
+}
+
+socket.on("roomCreated", data=>{
+  roomCode=data.code; myPlayer=data.player; isHost=true;
+  document.getElementById("menuMsg").innerHTML=`Sala criada: <strong>${roomCode}</strong><br>Envie esse código para seu amigo.`;
+  statusEl.textContent=`Sala ${roomCode} criada. Aguardando jogador 2...`;
+});
+
+socket.on("roomJoined", data=>{
+  roomCode=data.code; myPlayer=data.player; isHost=false;
+  statusEl.textContent=`Entrou na sala ${roomCode}.`;
+});
+
+socket.on("startMatch", data=>{
+  document.getElementById("menu").style.display="none";
+  running=true;
+  resetPositions();
+  statusEl.textContent=`${data.p1Name} vs ${data.p2Name} • Sala ${data.code}`;
+  requestAnimationFrame(loop);
+});
+
+socket.on("remoteInput", data=>{
+  remoteInput[data.player]=data.input || {};
+});
+
+socket.on("syncState", state=>{
+  if(isHost) return;
+  score=state.score;
+  Object.assign(p1,state.p1);
+  Object.assign(p2,state.p2);
+  Object.assign(ball,state.ball);
+  draw();
+});
+
+socket.on("errorMsg", msg=>{
+  alert(msg);
+  statusEl.textContent=msg;
+});
+
+function getInput(player){
+  if(player===myPlayer){
+    return {
+      left:keys.left, right:keys.right, jump:keys.jump, kick:keys.kick
+    };
+  }
+  return remoteInput[player] || {};
+}
+
+function resetPositions(){
+  scoreEl.textContent=`${score.p1} × ${score.p2}`;
+  p1.x=220;p1.y=ground;p1.vx=0;p1.vy=0;p1.dir=1;p1.onGround=true;
+  p2.x=720;p2.y=ground;p2.vx=0;p2.vy=0;p2.dir=-1;p2.onGround=true;
+  ball.x=500;ball.y=230;ball.vx=(Math.random()>.5?3:-3);ball.vy=-2;ball.spin=0;
+}
+
+function updatePlayer(p,input){
+ const speed=5.2;
+ if(input.left){p.vx=-speed;p.dir=-1}
+ else if(input.right){p.vx=speed;p.dir=1}
+ else p.vx*=0.82;
+ if(input.jump&&p.onGround){p.vy=-13;p.onGround=false}
+ p.vy+=gravity;p.x+=p.vx;p.y+=p.vy;
+ if(p.y>ground){p.y=ground;p.vy=0;p.onGround=true}
+ p.x=Math.max(60,Math.min(W-60,p.x));
+ if(p.kickCooldown>0)p.kickCooldown--;
+ if(input.kick&&p.kickCooldown<=0){kickBall(p);p.kickCooldown=24}
+}
+
+function kickBall(p){
+ const footX=p.x+32*p.dir, footY=p.y-8;
+ const dx=ball.x-footX,dy=ball.y-footY;
+ const d=Math.sqrt(dx*dx+dy*dy);
+ if(d<85){ball.vx+=p.dir*8;ball.vy-=6;ball.spin+=p.dir*.25}
+}
+
+function updateBall(){
+ ball.vy+=gravity*0.75;ball.x+=ball.vx;ball.y+=ball.vy;ball.spin+=ball.vx*.015;
+ ball.vx*=0.995;
+ if(ball.y+ball.r>ground+2){ball.y=ground+2-ball.r;ball.vy*=-0.72;ball.vx*=0.92;if(Math.abs(ball.vy)<1.5)ball.vy=0}
+ if(ball.y-ball.r<0){ball.y=ball.r;ball.vy*=-.8}
+ if(ball.x-ball.r<0){ball.x=ball.r;ball.vx*=-.8}
+ if(ball.x+ball.r>W){ball.x=W-ball.r;ball.vx*=-.8}
+ collidePlayer(p1);collidePlayer(p2);checkGoal();
+}
+
+function collidePlayer(p){
+ const headX=p.x, headY=p.y-93;
+ let dx=ball.x-headX,dy=ball.y-headY;
+ let dist=Math.sqrt(dx*dx+dy*dy);
+ if(dist<ball.r+39&&dist>0){
+  let nx=dx/dist,ny=dy/dist;
+  ball.x=headX+nx*(ball.r+39);ball.y=headY+ny*(ball.r+39);
+  ball.vx=nx*7+p.vx*.8;ball.vy=ny*7+p.vy*.2;
+ }
+}
+
+function checkGoal(){
+ if(ball.y>ground-155&&ball.y<ground+5){
+  if(ball.x-ball.r<=8){score.p2++;resetPositions()}
+  if(ball.x+ball.r>=W-8){score.p1++;resetPositions()}
+ }
+ scoreEl.textContent=`${score.p1} × ${score.p2}`;
+}
+
+function draw(){
+ ctx.clearRect(0,0,W,H);
+ let sky=ctx.createLinearGradient(0,0,0,H);sky.addColorStop(0,'#262626');sky.addColorStop(.55,'#181818');sky.addColorStop(.56,'#0d632e');sky.addColorStop(1,'#07411d');ctx.fillStyle=sky;ctx.fillRect(0,0,W,H);
+ ctx.strokeStyle='rgba(255,255,255,.65)';ctx.lineWidth=4;
+ ctx.beginPath();ctx.moveTo(W/2,ground-190);ctx.lineTo(W/2,H);ctx.stroke();
+ drawGoal(0);drawGoal(W);drawPlayer(p1);drawPlayer(p2);drawBall();
+}
+function drawGoal(side){
+ ctx.strokeStyle='#fff';ctx.lineWidth=6;ctx.fillStyle='rgba(255,255,255,.08)';
+ if(side===0){ctx.fillRect(0,ground-155,85,155);ctx.strokeRect(0,ground-155,85,155)}
+ else{ctx.fillRect(W-85,ground-155,85,155);ctx.strokeRect(W-85,ground-155,85,155)}
+}
+function drawPlayer(p){
+ ctx.save();ctx.translate(p.x,p.y);
+ ctx.fillStyle='rgba(0,0,0,.35)';ctx.beginPath();ctx.ellipse(0,6,42,12,0,0,Math.PI*2);ctx.fill();
+ ctx.fillStyle=p.accent;roundRect(-24,-58,48,52,12);ctx.fill();
+ ctx.fillStyle=p.color;ctx.beginPath();ctx.arc(0,-93,38,0,Math.PI*2);ctx.fill();ctx.strokeStyle='#111';ctx.lineWidth=3;ctx.stroke();
+ ctx.fillStyle='#111';ctx.beginPath();ctx.arc(-12,-100,4,0,Math.PI*2);ctx.arc(13,-100,4,0,Math.PI*2);ctx.fill();
+ ctx.strokeStyle=p.color;ctx.lineWidth=12;ctx.lineCap='round';ctx.beginPath();ctx.moveTo(10,-15);ctx.lineTo(30*p.dir,0);ctx.stroke();
+ ctx.fillStyle=p.color;ctx.beginPath();ctx.ellipse(32*p.dir,2,18,8,0,0,Math.PI*2);ctx.fill();
+ ctx.restore();
+}
+function drawBall(){
+ ctx.save();ctx.translate(ball.x,ball.y);ctx.rotate(ball.spin);
+ ctx.fillStyle='#f8f8f8';ctx.beginPath();ctx.arc(0,0,ball.r,0,Math.PI*2);ctx.fill();ctx.strokeStyle='#111';ctx.lineWidth=2;ctx.stroke();
+ ctx.fillStyle='#111';for(let i=0;i<5;i++){ctx.rotate(Math.PI*2/5);ctx.beginPath();ctx.arc(0,-10,5,0,Math.PI*2);ctx.fill()}
+ ctx.restore();
+}
+function roundRect(x,y,w,h,r){ctx.beginPath();ctx.moveTo(x+r,y);ctx.lineTo(x+w-r,y);ctx.quadraticCurveTo(x+w,y,x+w,y+r);ctx.lineTo(x+w,y+h-r);ctx.quadraticCurveTo(x+w,y+h,x+w-r,y+h);ctx.lineTo(x+r,y+h);ctx.quadraticCurveTo(x,y+h,x,y+h-r);ctx.lineTo(x,y+r);ctx.quadraticCurveTo(x,y,x+r,y);ctx.closePath()}
+
+function loop(t){
+ if(!running)return;
+ const myInput=getInput(myPlayer);
+ socket.emit("playerInput",{code:roomCode,player:myPlayer,input:myInput});
+
+ if(isHost){
+   updatePlayer(p1,getInput("p1"));
+   updatePlayer(p2,getInput("p2"));
+   updateBall();
+   if(t-lastSync>33){
+     socket.emit("gameState",{code:roomCode,state:{p1,p2,ball,score}});
+     lastSync=t;
+   }
+ }
+ draw();
+ requestAnimationFrame(loop);
+}
+
+document.addEventListener('keydown',e=>{
+ const k=e.key.toLowerCase();
+ if(k==='a'||k==='arrowleft')keys.left=true;
+ if(k==='d'||k==='arrowright')keys.right=true;
+ if(k==='w'||k==='arrowup')keys.jump=true;
+ if(k==='f'||k==='l'||k===' ')keys.kick=true;
+});
+document.addEventListener('keyup',e=>{
+ const k=e.key.toLowerCase();
+ if(k==='a'||k==='arrowleft')keys.left=false;
+ if(k==='d'||k==='arrowright')keys.right=false;
+ if(k==='w'||k==='arrowup')keys.jump=false;
+ if(k==='f'||k==='l'||k===' ')keys.kick=false;
+});
+
+function bindMobile(id,key){const el=document.getElementById(id);el.addEventListener('touchstart',e=>{e.preventDefault();keys[key]=true});el.addEventListener('touchend',e=>{e.preventDefault();keys[key]=false});}
+bindMobile('mLeft','left');bindMobile('mRight','right');bindMobile('mJump','jump');bindMobile('mKick','kick');
+
+draw();
+</script>
+</body>
+</html>
